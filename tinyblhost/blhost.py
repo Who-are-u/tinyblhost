@@ -29,11 +29,14 @@ class Blhost():
 
     def get_property(self, tag, index = 0):
         status, response_result = package.execute_command(self.ser, 0x07, 0x00, [tag, index], None, receive_data=False, expected_response = resp.GETPROPERTY_RESPONSE)
-        return response_result[0], [response_result[i+1] for i in range(len(response_result)-1)]
+        return status, response_result
 
     def read_memory(self, addr, byte_count, file, memory_id=0):
         status, response_result = package.execute_command(self.ser, 0x03, 0x00, [addr, byte_count, memory_id], None, receive_data=True, expected_response = resp.READMEMORY_RESPONSE)        
-        return response_result[0], [response_result[i+1] for i in range(len(response_result)-1)]
+        with open(file, "wb") as file:
+            file.write(response_result[1])
+
+        return status, [file]
 
     def write_memory(self, addr, file, memory_id=0):
         if isinstance(file, str):
@@ -47,4 +50,4 @@ class Blhost():
         
         byte_count = len(file_data)
         status, response_result = package.execute_command(self.ser, 0x04, 0x00, [addr, byte_count, memory_id], file_data, receive_data=False, expected_response = resp.GENERIC_RESPONSE)
-        return response_result[0], [response_result[i+1] for i in range(len(response_result)-1)]
+        return status, response_result

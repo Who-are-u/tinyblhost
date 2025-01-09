@@ -57,7 +57,7 @@ def create_command_packet(tag, flags, params):
 def send_packet(ser, packet):
     """通过串行端口发送包"""
     ser.write(packet)
-    print("Packet sent:", binascii.hexlify(packet))
+    print("Packet >>:", binascii.hexlify(packet))
 
 def response_packet(ser, expected_response=None):
     """接收并处理包，根据预期的包类型和标签进行处理"""
@@ -106,6 +106,7 @@ def response_ping_packet(ser):
     result = ()
     try:
         framing_header = ser.read(2)
+        packet = bytearray()
         if framing_header and framing_header[0] == 0x5A:
             packet_type = framing_header[1]
             if packet_type == PING_RESPONSE_PACKET_TYPE:
@@ -117,12 +118,15 @@ def response_ping_packet(ser):
                     status = True
                 else:
                     print("CRC mismatch in received data.")
+                packet = framing_header + payload_data + crc_data
             else:
                 print("Invalid ping response packet")
         else:
             print("Invalid framing header or start byte.")
     except Exception as e:
-        pass
+        raise ValueError("timeout")
+    else:
+        print("Packet <<:", binascii.hexlify(packet))
 
     return status, result
 
@@ -132,19 +136,21 @@ def response_special_frame_packet(ser):
     result = ()
     try:
         framing_header = ser.read(2)
-        packet_type = None
+        packet = bytearray()
         if framing_header and framing_header[0] == 0x5A:
             packet_type = framing_header[1]
-            if packet_type in [0xA1, 0xA2, 0xA3]:
-                print(f"Special Frame Packet {packet_type: #04x}")    
+            if packet_type in [0xA1, 0xA2, 0xA3]:   
                 result = (packet_type)
                 status  = True
             else:
                 print(f"Invalid packet type {packet_type : #04x}")
+            packet = framing_header
         else:
             print("Invalid framing header or start byte.")
     except Exception as e:
-        pass
+        raise ValueError("timeout")
+    else:
+        print("Packet <<:", binascii.hexlify(packet))
 
     return status, result
 
@@ -152,49 +158,57 @@ def execute_command(ser, tag, flags, params, data_to_send=None, receive_data=Fal
     """
     执行命令，包括 Ping 阶段、命令阶段以及可选的数据发送和接收阶段。
     """
-    # Send a ping package to the slave device.
+    status_code = -1
+    response_data = []
+
+    # Send ping package and wait for ping response package.
     ping_packet = struct.pack('<BB', 0x5A, PING_PACKET_TYPE)
     send_packet(ser, ping_packet)
     status, result = response_ping_packet(ser)
+    if not status:
+        reponse_packet = create_special_frame_packet(RESPONSE_PACKET_TYPE_ACK)
+        send_packet(ser, reponse_packet)
+    else:
+        # Parse Ping package if necessary.
+        pass
     
-    # If the command has data to be send, query the maxium package size supported.
+    # If the command, such as write-memory, which has data phase, query the supported maxium package size firstly
     if data_to_send is not None:
         command_packet = create_command_packet(0x07, 0x00, [0xb, 0x00])
         frame_packet = create_frame_packet(COMMAND_PACKET_TYPE, command_packet)
         send_packet(ser, frame_packet)
 
-        status, result = response_special_frame_packet(ser)    
-        if status and result == 0xA1:
+        try:
+            response_special_frame_packet(ser)  
             status, result = response_packet(ser, expected_response=resp.GETPROPERTY_RESPONSE)
-            if status:
-                max_data_length = result[1]
-            else:
-                max_data_length = 512
+        except Exception as e: 
+            max_data_length = 512  
+            print(e)
         else:
-            max_data_length = 512
-
-        # answer an ack
-        reponse_packet = create_special_frame_packet(RESPONSE_PACKET_TYPE_ACK)
-        send_packet(ser, reponse_packet)
+            max_data_length = result[1]
+        finally:
+            reponse_packet = create_special_frame_packet(RESPONSE_PACKET_TYPE_ACK)
+            send_packet(ser, reponse_packet)
     
-    # send the command package.
+    # The command phase, send command
     command_packet = create_command_packet(tag, flags, params)
     frame_packet = create_frame_packet(COMMAND_PACKET_TYPE, command_packet)
     send_packet(ser, frame_packet)
 
-    # normally, it will receive an ack as the reponse, and the response package.
-    status, result = response_special_frame_packet(ser)  
-    if status and result == 0xA1:
+    try:
+        response_special_frame_packet(ser) 
         status, response_result = response_packet(ser, expected_response=expected_response)
-        if not status:
-            print("no response.")           
+    except Exception as e:
+        print(e)
     else:
-        print("no response.")
-
-    """The data phase"""
-    if data_to_send is not None:
+        status_code = response_result[0]
+        response_data = [response_result[i+1] for i in range(len(response_result)-1)]     
+    finally:
         reponse_packet = create_special_frame_packet(RESPONSE_PACKET_TYPE_ACK)
-        send_packet(ser, reponse_packet)
+        send_packet(ser, reponse_packet)    
+
+    # The data phase(send).
+    if data_to_send is not None:
         for i in range(0, (len(data_to_send) + max_data_length - 1)//max_data_length, 1):
             if i == len(data_to_send)//max_data_length:
                 package_len = len(data_to_send)%max_data_length
@@ -203,36 +217,50 @@ def execute_command(ser, tag, flags, params, data_to_send=None, receive_data=Fal
             chunk = data_to_send[i*max_data_length:i*max_data_length + package_len]
             data_frame_packet = create_frame_packet(DATA_PACKET_TYPE, chunk)
             send_packet(ser, data_frame_packet)
+            
             status, result = response_special_frame_packet(ser)
             if status and result !=0xA1:
-                print("no response.")
+                print("Abort transfer.")
+                break
+    
+        try:
+            status, response_result = response_packet(ser, expected_response=resp.GENERIC_RESPONSE)
+        except Exception as e:
+            print(e)
+        else:
+            status_code = response_result[0]
+            response_data = [response_result[i+1] for i in range(len(response_result)-1)]    
+        finally:
+            reponse_packet = create_special_frame_packet(RESPONSE_PACKET_TYPE_ACK)
+            send_packet(ser, reponse_packet) 
 
-        status, response_result = response_packet(ser, expected_response=resp.GENERIC_RESPONSE)
-        if not status:
-            print("no response.")
 
-    # If the command has data receive phase, the host should send ack packet to request the next one data packet
+    # The data phase(receive)
     if receive_data:
-        reponse_packet = create_special_frame_packet(RESPONSE_PACKET_TYPE_ACK)
-        send_packet(ser, reponse_packet)
         data_len = 0
         data_bytes = b''
         while True:
-            status, result = response_packet(ser)
-            if not status:
-                print("no response.")
+            try:
+                status, receive_data = response_packet(ser)
+            except Exception as e:
+                print(e)
+            else:
+                data_len = data_len + len(receive_data)
+                data_bytes = data_bytes + receive_data
+            finally:
+                reponse_packet = create_special_frame_packet(RESPONSE_PACKET_TYPE_ACK)
+                send_packet(ser, reponse_packet)
+                if data_len >= params[1]:
+                    break
 
+        try:  
+            status, _ = response_packet(ser, expected_response=resp.GENERIC_RESPONSE)
+        except Exception as e:
+            print(e)
+        else:
+            response_data.append(data_bytes)
+        finally:
             reponse_packet = create_special_frame_packet(RESPONSE_PACKET_TYPE_ACK)
             send_packet(ser, reponse_packet)
-            data_len = data_len + len(result)
-            data_bytes = data_bytes + result
-            if data_len >= params[1]:
-                break
-        status, _ = response_packet(ser, expected_response=resp.GENERIC_RESPONSE)
-        if not status:
-            print("no response.")
 
-    reponse_packet = create_special_frame_packet(RESPONSE_PACKET_TYPE_ACK)
-    send_packet(ser, reponse_packet)
-
-    return status, response_result
+    return status_code, response_data
