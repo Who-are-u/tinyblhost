@@ -16,8 +16,8 @@ import tinyblhost.response as resp
 class Blhost():
     def __init__(self, port='COM38', baudrate=115200):
         self.ser = serial.Serial(
-            port='COM38',
-            baudrate=115200,
+            port=port,
+            baudrate=baudrate,
             parity=serial.PARITY_NONE,
             stopbits=serial.STOPBITS_ONE,
             bytesize=serial.EIGHTBITS,
